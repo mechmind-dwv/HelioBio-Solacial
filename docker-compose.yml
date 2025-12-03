@@ -1,0 +1,387 @@
+# ═══════════════════════════════════════════════════════════════════════════
+# 🌞 HelioBio-Solacial - Docker Compose Configuration
+# ═══════════════════════════════════════════════════════════════════════════
+# "Las ciencias del siglo XXI serán correlaciones cósmicas o no serán"
+#
+# Puertos asignados: 1150-1180
+# Uso: docker-compose up -d
+# ═══════════════════════════════════════════════════════════════════════════
+
+version: '3.8'
+
+# ═══════════════════════════════════════════════════════════════════════════
+# NETWORKS - Red interna para comunicación entre servicios
+# ═══════════════════════════════════════════════════════════════════════════
+networks:
+  heliobio-net:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.25.0.0/16
+
+# ═══════════════════════════════════════════════════════════════════════════
+# VOLUMES - Persistencia de datos
+# ═══════════════════════════════════════════════════════════════════════════
+volumes:
+  postgres_data:
+    driver: local
+  redis_data:
+    driver: local
+  jupyter_data:
+    driver: local
+  grafana_data:
+    driver: local
+  pgadmin_data:
+    driver: local
+
+# ═══════════════════════════════════════════════════════════════════════════
+# SERVICES - Todos los servicios del ecosistema HelioBio-Solacial
+# ═══════════════════════════════════════════════════════════════════════════
+services:
+
+  # ═══════════════════════════════════════════════════════════════════════════
+  # DATABASE - PostgreSQL + TimescaleDB (Puerto 1152)
+  # ═══════════════════════════════════════════════════════════════════════════
+  postgres:
+    image: timescale/timescaledb:latest-pg14
+    container_name: heliobio-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: heliobio_solacial
+      POSTGRES_USER: heliobio
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-cosmic_password_2025}
+      PGDATA: /var/lib/postgresql/data/pgdata
+    ports:
+      - "1152:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./database/postgres/init.sql:/docker-entrypoint-initdb.d/01-init.sql
+      - ./database/postgres/schema.sql:/docker-entrypoint-initdb.d/02-schema.sql
+      - ./database/postgres/timescale_setup.sql:/docker-entrypoint-initdb.d/03-timescale.sql
+    networks:
+      heliobio-net:
+        ipv4_address: 172.25.0.10
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U heliobio"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    labels:
+      - "com.heliobio.service=database"
+      - "com.heliobio.port=1152"
+
+  # ═══════════════════════════════════════════════════════════════════════════
+  # CACHE - Redis (Puerto 1153)
+  # ═══════════════════════════════════════════════════════════════════════════
+  redis:
+    image: redis:7-alpine
+    container_name: heliobio-redis
+    restart: unless-stopped
+    command: redis-server --appendonly yes --requirepass ${REDIS_PASSWORD:-cosmic_redis_2025}
+    ports:
+      - "1153:6379"
+    volumes:
+      - redis_data:/data
+      - ./database/redis/redis.conf:/usr/local/etc/redis/redis.conf
+    networks:
+      heliobio-net:
+        ipv4_address: 172.25.0.11
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+    labels:
+      - "com.heliobio.service=cache"
+      - "com.heliobio.port=1153"
+
+  # ═══════════════════════════════════════════════════════════════════════════
+  # BACKEND - FastAPI (Puerto 1150)
+  # ═══════════════════════════════════════════════════════════════════════════
+  backend:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.backend
+    container_name: heliobio-backend
+    restart: unless-stopped
+    environment:
+      # Database
+      DATABASE_URL: postgresql://heliobio:${POSTGRES_PASSWORD:-cosmic_password_2025}@postgres:5432/heliobio_solacial
+      
+      # Redis
+      REDIS_URL: redis://:${REDIS_PASSWORD:-cosmic_redis_2025}@redis:6379/0
+      
+      # APIs Solares
+      NOAA_SWPC_URL: https://services.swpc.noaa.gov/json
+      NASA_API_KEY: ${NASA_API_KEY:-DEMO_KEY}
+      
+      # APIs Salud Mental
+      WHO_GHO_URL: https://ghoapi.azureedge.net/api
+      
+      # Configuración
+      DEBUG: ${DEBUG:-False}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      BACKEND_PORT: 1150
+      
+      # CORS
+      CORS_ORIGINS: http://localhost:1151,http://frontend:3000
+    ports:
+      - "1150:8000"
+    volumes:
+      - ./backend:/app
+      - ./data:/data
+      - ./logs:/logs
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      heliobio-net:
+        ipv4_address: 172.25.0.20
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/api/v1/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    labels:
+      - "com.heliobio.service=backend"
+      - "com.heliobio.port=1150"
+
+  # ═══════════════════════════════════════════════════════════════════════════
+  # FRONTEND - React Dashboard (Puerto 1151)
+  # ═══════════════════════════════════════════════════════════════════════════
+  frontend:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.frontend
+    container_name: heliobio-frontend
+    restart: unless-stopped
+    environment:
+      REACT_APP_API_URL: http://localhost:1150
+      REACT_APP_WS_URL: ws://localhost:1159
+      NODE_ENV: ${NODE_ENV:-development}
+      PORT: 3000
+    ports:
+      - "1151:3000"
+    volumes:
+      - ./frontend/src:/app/src
+      - ./frontend/public:/app/public
+      - /app/node_modules
+    depends_on:
+      - backend
+    networks:
+      heliobio-net:
+        ipv4_address: 172.25.0.21
+    labels:
+      - "com.heliobio.service=frontend"
+      - "com.heliobio.port=1151"
+
+  # ═══════════════════════════════════════════════════════════════════════════
+  # JUPYTER - Análisis Científico (Puerto 1154)
+  # ═══════════════════════════════════════════════════════════════════════════
+  jupyter:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.jupyter
+    container_name: heliobio-jupyter
+    restart: unless-stopped
+    environment:
+      JUPYTER_ENABLE_LAB: "yes"
+      JUPYTER_TOKEN: ${JUPYTER_TOKEN:-heliobio2025}
+      DATABASE_URL: postgresql://heliobio:${POSTGRES_PASSWORD:-cosmic_password_2025}@postgres:5432/heliobio_solacial
+    ports:
+      - "1154:8888"
+    volumes:
+      - ./analysis:/home/jovyan/work
+      - ./data:/home/jovyan/data
+      - jupyter_data:/home/jovyan/.jupyter
+    depends_on:
+      - postgres
+      - backend
+    networks:
+      heliobio-net:
+        ipv4_address: 172.25.0.22
+    labels:
+      - "com.heliobio.service=jupyter"
+      - "com.heliobio.port=1154"
+
+  # ═══════════════════════════════════════════════════════════════════════════
+  # PGADMIN - Gestión de Base de Datos (Puerto 1155)
+  # ═══════════════════════════════════════════════════════════════════════════
+  pgadmin:
+    image: dpage/pgadmin4:latest
+    container_name: heliobio-pgadmin
+    restart: unless-stopped
+    environment:
+      PGADMIN_DEFAULT_EMAIL: ${PGADMIN_EMAIL:-admin@heliobio.dev}
+      PGADMIN_DEFAULT_PASSWORD: ${PGADMIN_PASSWORD:-admin2025}
+      PGADMIN_LISTEN_PORT: 80
+    ports:
+      - "1155:80"
+    volumes:
+      - pgadmin_data:/var/lib/pgadmin
+      - ./database/postgres/pgadmin-servers.json:/pgadmin4/servers.json
+    depends_on:
+      - postgres
+    networks:
+      heliobio-net:
+        ipv4_address: 172.25.0.23
+    labels:
+      - "com.heliobio.service=pgadmin"
+      - "com.heliobio.port=1155"
+
+  # ═══════════════════════════════════════════════════════════════════════════
+  # GRAFANA - Visualización de Métricas (Puerto 1156)
+  # ═══════════════════════════════════════════════════════════════════════════
+  grafana:
+    image: grafana/grafana:latest
+    container_name: heliobio-grafana
+    restart: unless-stopped
+    environment:
+      GF_SECURITY_ADMIN_USER: ${GRAFANA_USER:-admin}
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_PASSWORD:-admin2025}
+      GF_SERVER_HTTP_PORT: 3000
+      GF_DATABASE_TYPE: postgres
+      GF_DATABASE_HOST: postgres:5432
+      GF_DATABASE_NAME: heliobio_solacial
+      GF_DATABASE_USER: heliobio
+      GF_DATABASE_PASSWORD: ${POSTGRES_PASSWORD:-cosmic_password_2025}
+    ports:
+      - "1156:3000"
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./deployment/grafana/dashboards:/etc/grafana/provisioning/dashboards
+      - ./deployment/grafana/datasources:/etc/grafana/provisioning/datasources
+    depends_on:
+      - postgres
+    networks:
+      heliobio-net:
+        ipv4_address: 172.25.0.24
+    labels:
+      - "com.heliobio.service=grafana"
+      - "com.heliobio.port=1156"
+
+  # ═══════════════════════════════════════════════════════════════════════════
+  # NGINX - Reverse Proxy & Load Balancer (Puerto 1157)
+  # ═══════════════════════════════════════════════════════════════════════════
+  nginx:
+    image: nginx:alpine
+    container_name: heliobio-nginx
+    restart: unless-stopped
+    ports:
+      - "1157:80"
+      - "1158:443"
+    volumes:
+      - ./docker/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./docker/ssl:/etc/nginx/ssl:ro
+    depends_on:
+      - backend
+      - frontend
+    networks:
+      heliobio-net:
+        ipv4_address: 172.25.0.25
+    labels:
+      - "com.heliobio.service=nginx"
+      - "com.heliobio.port=1157"
+
+  # ═══════════════════════════════════════════════════════════════════════════
+  # WEBSOCKET SERVER - Real-time Updates (Puerto 1159)
+  # ═══════════════════════════════════════════════════════════════════════════
+  websocket:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.websocket
+    container_name: heliobio-websocket
+    restart: unless-stopped
+    environment:
+      REDIS_URL: redis://:${REDIS_PASSWORD:-cosmic_redis_2025}@redis:6379/0
+      BACKEND_URL: http://backend:8000
+    ports:
+      - "1159:8080"
+    depends_on:
+      - redis
+      - backend
+    networks:
+      heliobio-net:
+        ipv4_address: 172.25.0.26
+    labels:
+      - "com.heliobio.service=websocket"
+      - "com.heliobio.port=1159"
+
+  # ═══════════════════════════════════════════════════════════════════════════
+  # METRICS COLLECTOR - Prometheus (Puerto 1160)
+  # ═══════════════════════════════════════════════════════════════════════════
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: heliobio-prometheus
+    restart: unless-stopped
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      - '--web.console.libraries=/etc/prometheus/console_libraries'
+      - '--web.console.templates=/etc/prometheus/consoles'
+    ports:
+      - "1160:9090"
+    volumes:
+      - ./deployment/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml
+      - prometheus_data:/prometheus
+    networks:
+      heliobio-net:
+        ipv4_address: 172.25.0.27
+    labels:
+      - "com.heliobio.service=prometheus"
+      - "com.heliobio.port=1160"
+
+volumes:
+  prometheus_data:
+    driver: local
+
+# ═══════════════════════════════════════════════════════════════════════════
+# COMANDOS ÚTILES
+# ═══════════════════════════════════════════════════════════════════════════
+# 
+# Iniciar todos los servicios:
+#   docker-compose up -d
+# 
+# Ver logs en tiempo real:
+#   docker-compose logs -f
+# 
+# Ver estado de servicios:
+#   docker-compose ps
+# 
+# Detener todos los servicios:
+#   docker-compose down
+# 
+# Reiniciar un servicio específico:
+#   docker-compose restart backend
+# 
+# Ejecutar comando en contenedor:
+#   docker-compose exec backend python manage.py
+# 
+# Ver logs de un servicio:
+#   docker-compose logs backend
+# 
+# Rebuild después de cambios:
+#   docker-compose up -d --build
+# 
+# Limpiar todo (¡CUIDADO! Borra volúmenes):
+#   docker-compose down -v
+# 
+# ═══════════════════════════════════════════════════════════════════════════
+# ACCESO A SERVICIOS
+# ═══════════════════════════════════════════════════════════════════════════
+# 
+# Frontend Dashboard:   http://localhost:1151
+# Backend API:          http://localhost:1150
+# API Documentation:    http://localhost:1150/docs
+# PostgreSQL:           localhost:1152 (usuario: heliobio)
+# Redis:                localhost:1153
+# Jupyter Notebooks:    http://localhost:1154 (token: heliobio2025)
+# PgAdmin:              http://localhost:1155 (admin@heliobio.dev)
+# Grafana:              http://localhost:1156 (admin/admin2025)
+# Nginx:                http://localhost:1157
+# WebSocket:            ws://localhost:1159
+# Prometheus:           http://localhost:1160
+# 
+# ═══════════════════════════════════════════════════════════════════════════
