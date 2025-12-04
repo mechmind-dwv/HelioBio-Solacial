@@ -1,0 +1,17 @@
+# docker-compose.swarm.yml
+version: '3.8'
+
+services:
+  backend:
+    image: heliobio/backend:latest
+    deploy:
+      replicas: 3
+      update_config:
+        parallelism: 1
+        delay: 10s
+      restart_policy:
+        condition: on-failure
+    ports:
+      - target: 8000
+        published: 1150
+        mode: host
